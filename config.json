@@ -1,0 +1,239 @@
+{
+  "poll": {
+    "news_lookback_minutes": 90,
+    "quiet_hours_kst": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "max_news_per_cycle": 12,
+    "max_theme_news_per_cycle": 4,
+    "seen_retention_days": 5
+  },
+  "stocks": [
+    {
+      "name": "혜인",
+      "code": "003010",
+      "queries": [
+        "혜인 캐터필러",
+        "혜인 건설기계",
+        "혜인 주가"
+      ],
+      "must_include_any": [
+        "혜인"
+      ],
+      "exclude_any": [
+        "평화홀딩스",
+        "부고",
+        "별세",
+        "결혼",
+        "혜인이"
+      ]
+    },
+    {
+      "name": "삼아알미늄",
+      "code": "006110",
+      "queries": [
+        "삼아알미늄"
+      ],
+      "must_include_any": [
+        "삼아알미늄",
+        "삼아 알미늄"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "키다리스튜디오",
+      "code": "020120",
+      "queries": [
+        "키다리스튜디오",
+        "레진코믹스 키다리"
+      ],
+      "must_include_any": [
+        "키다리스튜디오",
+        "키다리 스튜디오"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "테이팩스",
+      "code": "055490",
+      "queries": [
+        "테이팩스"
+      ],
+      "must_include_any": [
+        "테이팩스"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "제이에스링크",
+      "code": "322510",
+      "queries": [
+        "제이에스링크"
+      ],
+      "must_include_any": [
+        "제이에스링크",
+        "JS링크"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "유니셈",
+      "code": "036200",
+      "queries": [
+        "유니셈"
+      ],
+      "must_include_any": [
+        "유니셈"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "상신이디피",
+      "code": "091580",
+      "queries": [
+        "상신이디피"
+      ],
+      "must_include_any": [
+        "상신이디피",
+        "상신 이디피"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "지엔씨에너지",
+      "code": "119850",
+      "queries": [
+        "지엔씨에너지"
+      ],
+      "must_include_any": [
+        "지엔씨에너지",
+        "GNC에너지"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "자이에스앤디",
+      "code": "317400",
+      "queries": [
+        "자이에스앤디"
+      ],
+      "must_include_any": [
+        "자이에스앤디",
+        "자이S&D"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "삼성SDI",
+      "code": "006400",
+      "queries": [
+        "삼성SDI"
+      ],
+      "must_include_any": [
+        "삼성SDI",
+        "삼성 SDI"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "후성",
+      "code": "093370",
+      "queries": [
+        "후성 반도체",
+        "후성 전해질",
+        "후성 LiPF6",
+        "후성 주가"
+      ],
+      "must_include_any": [
+        "후성"
+      ],
+      "exclude_any": [
+        "후성유전",
+        "후성학",
+        "후성적",
+        "후성유전학"
+      ]
+    }
+  ],
+  "themes": [
+    {
+      "name": "ESS",
+      "queries": [
+        "ESS 배터리",
+        "에너지저장장치 수주"
+      ],
+      "must_include_any": [
+        "ESS",
+        "에너지저장"
+      ],
+      "require_any": [
+        "수주",
+        "계약",
+        "증설",
+        "투자",
+        "정책",
+        "관세",
+        "공급",
+        "입찰",
+        "확대",
+        "가격",
+        "전망",
+        "설비"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "AIDC",
+      "queries": [
+        "AI 데이터센터 전력",
+        "데이터센터 투자"
+      ],
+      "must_include_any": [
+        "데이터센터",
+        "AIDC"
+      ],
+      "require_any": [
+        "수주",
+        "계약",
+        "증설",
+        "투자",
+        "전력",
+        "발주",
+        "착공",
+        "확대",
+        "공급",
+        "전망",
+        "설비"
+      ],
+      "exclude_any": []
+    },
+    {
+      "name": "반도체",
+      "queries": [
+        "반도체 장비 수주",
+        "반도체 소재 공급"
+      ],
+      "must_include_any": [
+        "반도체"
+      ],
+      "require_any": [
+        "수주",
+        "계약",
+        "증설",
+        "투자",
+        "발주",
+        "공급",
+        "가격",
+        "감산",
+        "전망",
+        "설비",
+        "가동"
+      ],
+      "exclude_any": []
+    }
+  ]
+}
