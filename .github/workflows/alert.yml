@@ -1,0 +1,65 @@
+name: 관심종목 실시간 알림
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "텔레그램으로 보내지 않고 로그로만 확인"
+        type: boolean
+        default: false
+      reset:
+        description: "읽음 기록을 지우고 처음부터 다시 시작"
+        type: boolean
+        default: false
+      check:
+        description: "키가 제대로 붙었는지만 점검 (알림은 안 보냄)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: stock-alert
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: 읽음 기록 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: seen-${{ github.run_id }}
+          restore-keys: |
+            seen-
+
+      - name: 폴링 실행
+        env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          ARGS=""
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ inputs.reset }}" = "true" ] && ARGS="$ARGS --reset --force"
+          [ "${{ inputs.check }}" = "true" ] && ARGS="--check"
+          python alert_bot.py $ARGS
+
+      - name: 읽음 기록 저장하기
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: seen-${{ github.run_id }}
