@@ -69,8 +69,9 @@ def load_state():
         with open(STATE_FILE, encoding="utf-8") as f:
             s = json.load(f)
     except (OSError, ValueError):
-        return {"news": {}, "bootstrapped": False}
+        return {"news": {}, "stories": {}, "bootstrapped": False}
     s.setdefault("news", {})
+    s.setdefault("stories", {})
     s.setdefault("bootstrapped", False)
     s.pop("dart", None)          # 예전 버전에서 남은 공시 기록은 버린다
     return s
@@ -79,12 +80,67 @@ def load_state():
 def save_state(state, retention_days):
     cutoff = time.time() - retention_days * 86400
     state["news"] = {k: v for k, v in state["news"].items() if v > cutoff}
+    state["stories"] = {k: v for k, v in state.get("stories", {}).items()
+                        if v.get("t", 0) > cutoff}
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
     os.replace(tmp, STATE_FILE)
-    log(f"state 저장: 기사 {len(state['news'])}건")
+    log(f"state 저장: 기사 {len(state['news'])}건 / 사건 {len(state.get('stories', {}))}건")
+
+
+# 제목에 흔히 붙는 말머리와 뜻 없는 낱말 — 같은 기사인지 볼 때 무시한다
+BRACKET_RE = re.compile(r"\[[^\]]*\]|\([^)]*\)|【[^】]*】|<[^>]*>|「[^」]*」")
+STOPWORDS = {
+    "단독", "속보", "종합", "특징주", "마감", "개장", "오늘", "어제", "내일",
+    "관련", "가운데", "대한", "위해", "통해", "따라", "밝혔다", "말했다", "전했다",
+    "이라고", "라고", "지난", "올해", "내년", "기자", "뉴스", "무단", "전재", "재배포",
+}
+
+
+def story_tokens(title):
+    """제목에서 뜻이 있는 낱말만 뽑아낸다. 같은 사건인지 비교하는 데 쓴다."""
+    t = BRACKET_RE.sub(" ", title or "")
+    t = re.sub(r"[^0-9A-Za-z가-힣]+", " ", t)
+    out = set()
+    for w in t.split():
+        w = w.lower()
+        if len(w) < 2 or w in STOPWORDS:
+            continue
+        out.add(w)
+    return out
+
+
+def story_bigrams(title):
+    """제목에서 공백·기호를 다 뺀 뒤 두 글자씩 잘라낸다.
+    "공급 계약"과 "공급계약"처럼 띄어쓰기만 다른 제목을 같게 보기 위한 장치."""
+    t = BRACKET_RE.sub(" ", title or "")
+    t = re.sub(r"[^0-9A-Za-z가-힣]+", "", t).lower()
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def _containment(a, b):
+    return len(a & b) / min(len(a), len(b)) if a and b else 0.0
+
+
+def same_story(a, b, min_ratio, min_shared, ga=None, gb=None):
+    """두 제목이 같은 사건을 다루는지 판단한다.
+    낱말이 충분히 겹치거나, 글자 단위로 거의 포개지면 같은 사건으로 본다."""
+    # ① 낱말 기준 — 겹치는 개수와 비율을 함께 본다
+    if a and b:
+        shared = len(a & b)
+        smaller = min(len(a), len(b))
+        if shared >= min(min_shared, smaller):
+            ratio = shared / smaller
+            if ratio >= (0.9 if smaller < min_shared else min_ratio):
+                return True
+
+    # ② 글자 기준 — 띄어쓰기나 조사만 다른 재송고를 잡는다
+    if ga and gb and min(len(ga), len(gb)) >= 8:
+        if _containment(ga, gb) >= 0.75:
+            return True
+    return False
 
 
 def news_key(url, title):
@@ -159,6 +215,17 @@ def fetch_naver_news(query, cid, csec, display=30, sort="date"):
     return out
 
 
+def is_price_noise(item, noise):
+    """주가가 얼마 올랐다는 얘기만 있고 이유가 없는 기사인지 판단.
+    시세 단어가 있어도 수주·실적 같은 알맹이가 함께 있으면 남긴다."""
+    if not noise:
+        return False
+    blob = f"{item['title']} {item['desc']}"
+    if not any(w in blob for w in noise.get("price_move_words", [])):
+        return False                      # 시세 기사가 아예 아님
+    return not any(w in blob for w in noise.get("substance_words", []))
+
+
 def matches(item, must_any, require_any, exclude_any):
     blob = f"{item['title']} {item['desc']}"
     if must_any and not any(k in blob for k in must_any):
@@ -172,9 +239,24 @@ def matches(item, must_any, require_any, exclude_any):
 
 def collect_news(cfg, state, cid, csec, now):
     lookback = dt.timedelta(minutes=cfg["poll"]["news_lookback_minutes"])
+    noise = cfg.get("noise_filter")
+    dup_cfg = cfg.get("duplicate_filter") or {}
+    dup_on = dup_cfg.get("enabled", True)
+    min_ratio = dup_cfg.get("similarity", 0.7)
+    min_shared = dup_cfg.get("min_shared_words", 4)
+    window = dup_cfg.get("window_hours", 48) * 3600
+
+    # 이미 보낸 사건들의 제목 낱말 — 언론사만 바뀐 같은 기사를 잡아내는 데 쓴다
+    cutoff = time.time() - window
+    known = [(set(v.get("w", [])), set(v.get("g", [])))
+             for v in state.get("stories", {}).values()
+             if v.get("t", 0) > cutoff]
+
+    dropped = [0]
+    dup_dropped = [0]
     hits = []
 
-    def scan(entries, label, emoji, cap, require_any=None):
+    def scan(entries, label, emoji, cap):
         picked = []
         for ent in entries:
             for q in ent["queries"]:
@@ -184,15 +266,27 @@ def collect_news(cfg, state, cid, csec, now):
                     if item["pub"] and now - item["pub"] > lookback:
                         continue
                     if not matches(item, ent.get("must_include_any"),
-                                   require_any and ent.get("require_any"),
+                                   ent.get("require_any"),
                                    ent.get("exclude_any")):
+                        continue
+                    if is_price_noise(item, noise):
+                        dropped[0] += 1
                         continue
                     key = news_key(item["url"], item["title"])
                     if key in state["news"] or any(h["key"] == key for h in picked):
                         continue
+                    toks = story_tokens(item["title"])
+                    grams = story_bigrams(item["title"])
+                    if dup_on and any(same_story(toks, kw, min_ratio, min_shared, grams, kg)
+                                      for kw, kg in known):
+                        dup_dropped[0] += 1
+                        continue
+                    if dup_on:
+                        known.append((toks, grams))   # 같은 사이클 안의 재탕도 막는다
                     picked.append({
                         "key": key, "kind": label, "emoji": emoji,
-                        "subject": ent["name"], **item,
+                        "subject": ent["name"],
+                        "tokens": sorted(toks), "grams": sorted(grams), **item,
                     })
                 time.sleep(0.12)   # 네이버 API 호출 간 최소 간격
         picked.sort(key=lambda h: h["pub"] or now, reverse=True)
@@ -201,7 +295,11 @@ def collect_news(cfg, state, cid, csec, now):
     hits += scan(cfg["stocks"], "종목", "🔔",
                  cfg["poll"]["max_news_per_cycle"])
     hits += scan(cfg["themes"], "산업", "🏭",
-                 cfg["poll"]["max_theme_news_per_cycle"], require_any=True)
+                 cfg["poll"]["max_theme_news_per_cycle"])
+    if dropped[0]:
+        log(f"시세만 다룬 기사 {dropped[0]}건 제외")
+    if dup_dropped[0]:
+        log(f"이미 보낸 사건의 재탕 기사 {dup_dropped[0]}건 제외")
     return hits
 
 
@@ -279,6 +377,45 @@ def run_check(naver_id, naver_secret, tg_token, tg_chat):
     return 1
 
 
+def run_probe(cfg, naver_id, naver_secret):
+    """읽음 기록과 시간 제한을 무시하고, 지금 필터에 걸리는 기사를 전부 보여준다.
+    검색어와 제외어를 손본 뒤 의도대로 걸리는지 확인하는 용도."""
+    cfg = json.loads(json.dumps(cfg))          # 원본을 건드리지 않으려고 복사
+    cfg["poll"]["news_lookback_minutes"] = 1440
+    cfg["poll"]["max_news_per_cycle"] = 500
+    cfg["poll"]["max_theme_news_per_cycle"] = 500
+
+    now = dt.datetime.now(KST)
+    hits = collect_news(cfg, {"news": {}, "stories": {}}, naver_id, naver_secret, now)
+
+    print("\n" + "=" * 60)
+    print(f" 최근 24시간 필터 통과 기사 — 총 {len(hits)}건")
+    print("=" * 60)
+
+    by_subject = {}
+    for h in hits:
+        by_subject.setdefault(f"{h['emoji']} {h['subject']}", []).append(h)
+
+    for subject in [f"{'🔔'} {s['name']}" for s in cfg["stocks"]] + \
+                   [f"{'🏭'} {t['name']}" for t in cfg["themes"]]:
+        found = by_subject.get(subject, [])
+        print(f"\n{subject} — {len(found)}건")
+        if not found:
+            print("   (없음) 검색어가 좁거나 오늘 기사가 없는 경우입니다.")
+        for h in found[:8]:
+            when = f"{h['pub'].astimezone(KST):%m/%d %H:%M}" if h.get("pub") else "시각미상"
+            print(f"   [{when}] {h['title'][:60]}")
+            print(f"            {h['url']}")
+        if len(found) > 8:
+            print(f"   … 외 {len(found) - 8}건")
+
+    print("\n" + "=" * 60)
+    print(" 이 목록은 화면에만 나오고 텔레그램으로는 가지 않습니다.")
+    print(" 빠진 기사가 있으면 config.json의 queries를 넓히고,")
+    print(" 엉뚱한 기사가 있으면 exclude_any에 그 단어를 넣으세요.")
+    return 0
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -291,6 +428,8 @@ def main():
                     help="기록을 지우고 처음부터 (첫 실행처럼 동작)")
     ap.add_argument("--check", action="store_true",
                     help="키가 제대로 붙었는지만 점검하고 종료")
+    ap.add_argument("--probe", action="store_true",
+                    help="필터 시험용 — 최근 24시간에서 걸리는 기사를 전부 화면에 나열")
     args = ap.parse_args()
 
     with open(os.path.join(BASE, "config.json"), encoding="utf-8") as f:
@@ -311,12 +450,16 @@ def main():
     if args.check:
         return run_check(naver_id, naver_secret, tg_token, tg_chat)
 
+    if args.probe:
+        return run_probe(cfg, naver_id, naver_secret)
+
     now = dt.datetime.now(KST)
     if not args.force and now.hour in cfg["poll"].get("quiet_hours_kst", []):
         log(f"조용한 시간대({now.hour}시)라 건너뜁니다.")
         return 0
 
-    state = {"news": {}, "bootstrapped": False} if args.reset else load_state()
+    state = ({"news": {}, "stories": {}, "bootstrapped": False}
+             if args.reset else load_state())
     first_run = not state["bootstrapped"]
 
     hits = collect_news(cfg, state, naver_id, naver_secret, now)
@@ -339,6 +482,8 @@ def main():
         # 첫 실행에 과거 기사가 한꺼번에 쏟아지지 않게 기록만 하고 넘어감
         for h in hits:
             state["news"][h["key"]] = time.time()
+            state["stories"][h["key"]] = {"w": h.get("tokens", []),
+                                          "g": h.get("grams", []), "t": time.time()}
         state["bootstrapped"] = True
         save_state(state, cfg["poll"]["seen_retention_days"])
         msg = (f"✅ <b>관심종목 실시간 뉴스 알림 시작</b>\n"
@@ -351,6 +496,8 @@ def main():
     for h in hits:
         if send_telegram(tg_token, tg_chat, render(h), args.dry_run):
             state["news"][h["key"]] = time.time()
+            state["stories"][h["key"]] = {"w": h.get("tokens", []),
+                                          "g": h.get("grams", []), "t": time.time()}
             sent += 1
             time.sleep(0.4)        # 텔레그램 rate limit 여유
     log(f"{sent}건 전송")
