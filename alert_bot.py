@@ -77,11 +77,12 @@ def load_state():
     return s
 
 
-def save_state(state, retention_days):
+def save_state(state, retention_days, story_hours=48):
     cutoff = time.time() - retention_days * 86400
     state["news"] = {k: v for k, v in state["news"].items() if v > cutoff}
+    story_cutoff = time.time() - story_hours * 3600
     state["stories"] = {k: v for k, v in state.get("stories", {}).items()
-                        if v.get("t", 0) > cutoff}
+                        if v.get("t", 0) > story_cutoff}
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -124,10 +125,11 @@ def _containment(a, b):
     return len(a & b) / min(len(a), len(b)) if a and b else 0.0
 
 
-def same_story(a, b, min_ratio, min_shared, ga=None, gb=None):
-    """두 제목이 같은 사건을 다루는지 판단한다.
-    낱말이 충분히 겹치거나, 글자 단위로 거의 포개지면 같은 사건으로 본다."""
-    # ① 낱말 기준 — 겹치는 개수와 비율을 함께 본다
+def same_story(a, b, min_ratio, min_shared, ga=None, gb=None,
+               ba=None, bb=None, body_ratio=0.5, body_shared=10):
+    """두 기사가 같은 사건을 다루는지 판단한다.
+    제목이 아예 다르게 뽑혀도 본문 요약이 거의 같은 경우가 많아 본문까지 본다."""
+    # ① 제목 낱말 — 겹치는 개수와 비율을 함께 본다
     if a and b:
         shared = len(a & b)
         smaller = min(len(a), len(b))
@@ -136,9 +138,16 @@ def same_story(a, b, min_ratio, min_shared, ga=None, gb=None):
             if ratio >= (0.9 if smaller < min_shared else min_ratio):
                 return True
 
-    # ② 글자 기준 — 띄어쓰기나 조사만 다른 재송고를 잡는다
+    # ② 제목 글자 — 띄어쓰기나 조사만 다른 재송고를 잡는다
     if ga and gb and min(len(ga), len(gb)) >= 8:
         if _containment(ga, gb) >= 0.75:
+            return True
+
+    # ③ 제목+본문 낱말 — 언론사마다 제목을 딴판으로 뽑은 같은 사건을 잡는다.
+    #    본문까지 합치면 글이 길어져서, 겹치는 낱말 개수 조건을 넉넉히 건다.
+    if ba and bb:
+        shared = len(ba & bb)
+        if shared >= body_shared and shared / min(len(ba), len(bb)) >= body_ratio:
             return True
     return False
 
@@ -226,9 +235,11 @@ def is_price_noise(item, noise):
     return not any(w in blob for w in noise.get("substance_words", []))
 
 
-def matches(item, must_any, require_any, exclude_any):
+def matches(item, must_any, require_any, exclude_any, must_in_title=False):
     blob = f"{item['title']} {item['desc']}"
-    if must_any and not any(k in blob for k in must_any):
+    # must_in_title이면 핵심어가 제목에 있어야 한다. 본문에 한 번 스친 기사를 막는다.
+    haystack = item["title"] if must_in_title else blob
+    if must_any and not any(k in haystack for k in must_any):
         return False
     if require_any and not any(k in blob for k in require_any):
         return False
@@ -244,11 +255,13 @@ def collect_news(cfg, state, cid, csec, now):
     dup_on = dup_cfg.get("enabled", True)
     min_ratio = dup_cfg.get("similarity", 0.7)
     min_shared = dup_cfg.get("min_shared_words", 4)
+    body_ratio = dup_cfg.get("body_similarity", 0.5)
+    body_shared = dup_cfg.get("body_min_shared_words", 10)
     window = dup_cfg.get("window_hours", 48) * 3600
 
     # 이미 보낸 사건들의 제목 낱말 — 언론사만 바뀐 같은 기사를 잡아내는 데 쓴다
     cutoff = time.time() - window
-    known = [(set(v.get("w", [])), set(v.get("g", [])))
+    known = [(set(v.get("w", [])), set(v.get("g", [])), set(v.get("b", [])))
              for v in state.get("stories", {}).values()
              if v.get("t", 0) > cutoff]
 
@@ -267,7 +280,8 @@ def collect_news(cfg, state, cid, csec, now):
                         continue
                     if not matches(item, ent.get("must_include_any"),
                                    ent.get("require_any"),
-                                   ent.get("exclude_any")):
+                                   ent.get("exclude_any"),
+                                   ent.get("require_in_title", False)):
                         continue
                     if is_price_noise(item, noise):
                         dropped[0] += 1
@@ -277,16 +291,19 @@ def collect_news(cfg, state, cid, csec, now):
                         continue
                     toks = story_tokens(item["title"])
                     grams = story_bigrams(item["title"])
-                    if dup_on and any(same_story(toks, kw, min_ratio, min_shared, grams, kg)
-                                      for kw, kg in known):
+                    btoks = story_tokens(f"{item['title']} {item['desc']}")
+                    if dup_on and any(
+                            same_story(toks, kw, min_ratio, min_shared, grams, kg,
+                                       btoks, kb, body_ratio, body_shared)
+                            for kw, kg, kb in known):
                         dup_dropped[0] += 1
                         continue
                     if dup_on:
-                        known.append((toks, grams))   # 같은 사이클 안의 재탕도 막는다
+                        known.append((toks, grams, btoks))  # 같은 사이클 안의 재탕도 막는다
                     picked.append({
                         "key": key, "kind": label, "emoji": emoji,
-                        "subject": ent["name"],
-                        "tokens": sorted(toks), "grams": sorted(grams), **item,
+                        "subject": ent["name"], "tokens": sorted(toks),
+                        "grams": sorted(grams), "btokens": sorted(btoks), **item,
                     })
                 time.sleep(0.12)   # 네이버 API 호출 간 최소 간격
         picked.sort(key=lambda h: h["pub"] or now, reverse=True)
@@ -483,9 +500,11 @@ def main():
         for h in hits:
             state["news"][h["key"]] = time.time()
             state["stories"][h["key"]] = {"w": h.get("tokens", []),
-                                          "g": h.get("grams", []), "t": time.time()}
+                                          "g": h.get("grams", []),
+                                          "b": h.get("btokens", []), "t": time.time()}
         state["bootstrapped"] = True
-        save_state(state, cfg["poll"]["seen_retention_days"])
+        save_state(state, cfg["poll"]["seen_retention_days"],
+                   (cfg.get("duplicate_filter") or {}).get("window_hours", 48))
         msg = (f"✅ <b>관심종목 실시간 뉴스 알림 시작</b>\n"
                f"종목 {len(cfg['stocks'])}개 · 산업 {len(cfg['themes'])}개 감시 중\n"
                f"기존 기사 {len(hits)}건은 읽음 처리했습니다. 지금부터 새로 뜨는 것만 보냅니다.")
@@ -497,11 +516,13 @@ def main():
         if send_telegram(tg_token, tg_chat, render(h), args.dry_run):
             state["news"][h["key"]] = time.time()
             state["stories"][h["key"]] = {"w": h.get("tokens", []),
-                                          "g": h.get("grams", []), "t": time.time()}
+                                          "g": h.get("grams", []),
+                                          "b": h.get("btokens", []), "t": time.time()}
             sent += 1
             time.sleep(0.4)        # 텔레그램 rate limit 여유
     log(f"{sent}건 전송")
-    save_state(state, cfg["poll"]["seen_retention_days"])
+    save_state(state, cfg["poll"]["seen_retention_days"],
+               (cfg.get("duplicate_filter") or {}).get("window_hours", 48))
     return 0
 
 
