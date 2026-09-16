@@ -100,13 +100,38 @@ STOPWORDS = {
 }
 
 
+# 낱말 끝에 붙는 조사와 흔한 어미. 긴 것부터 떼어낸다.
+# "스타트업이"와 "스타트업"을 같은 말로 세기 위한 장치다.
+SUFFIXES = [
+    "이라고는", "으로서는", "으로써는", "에게서는",
+    "이라고", "으로서", "으로써", "에게서", "에서는", "에게는", "한테는",
+    "까지는", "부터는", "보다는", "와의", "과의", "들이", "들을", "들은", "들도",
+    "라고", "이란", "이라", "이나", "으로", "에서", "에게", "한테", "까지",
+    "부터", "보다", "처럼", "마다", "했다", "한다", "하고", "하는", "였다",
+    "았다", "었다", "이다", "된다", "됐다",
+    "은", "는", "이", "가", "을", "를", "의", "에", "와", "과", "도",
+    "만", "로", "나", "랑", "해", "한", "된", "할",
+]
+
+
+def normalize_word(w):
+    """낱말 끝의 조사·어미를 떼어낸다. 떼고 나서 너무 짧아지면 원래 것을 쓴다."""
+    for suf in SUFFIXES:
+        if len(w) > len(suf) and w.endswith(suf):
+            stem = w[:-len(suf)]
+            if len(stem) >= 2:
+                return stem
+            break
+    return w
+
+
 def story_tokens(title):
     """제목에서 뜻이 있는 낱말만 뽑아낸다. 같은 사건인지 비교하는 데 쓴다."""
     t = BRACKET_RE.sub(" ", title or "")
     t = re.sub(r"[^0-9A-Za-z가-힣]+", " ", t)
     out = set()
     for w in t.split():
-        w = w.lower()
+        w = normalize_word(w.lower())
         if len(w) < 2 or w in STOPWORDS:
             continue
         out.add(w)
@@ -126,7 +151,9 @@ def _containment(a, b):
 
 
 def same_story(a, b, min_ratio, min_shared, ga=None, gb=None,
-               ba=None, bb=None, body_ratio=0.5, body_shared=10):
+               ba=None, bb=None, body_ratio=0.5, body_shared=10,
+               pub_a=None, pub_b=None, near_hours=6,
+               near_ratio=0.35, near_shared=9):
     """두 기사가 같은 사건을 다루는지 판단한다.
     제목이 아예 다르게 뽑혀도 본문 요약이 거의 같은 경우가 많아 본문까지 본다."""
     # ① 제목 낱말 — 겹치는 개수와 비율을 함께 본다
@@ -147,8 +174,16 @@ def same_story(a, b, min_ratio, min_shared, ga=None, gb=None,
     #    본문까지 합치면 글이 길어져서, 겹치는 낱말 개수 조건을 넉넉히 건다.
     if ba and bb:
         shared = len(ba & bb)
-        if shared >= body_shared and shared / min(len(ba), len(bb)) >= body_ratio:
+        smaller = min(len(ba), len(bb))
+        ratio = shared / smaller
+        if shared >= body_shared and ratio >= body_ratio:
             return True
+
+        # ④ 비슷한 시각에 나온 기사끼리는 기준을 낮춘다.
+        #    보도자료를 받아쓴 기사들은 몇 분~몇 시간 안에 몰려 나오기 때문이다.
+        if pub_a and pub_b and abs(pub_a - pub_b) <= near_hours * 3600:
+            if shared >= near_shared and ratio >= near_ratio:
+                return True
     return False
 
 
@@ -257,11 +292,14 @@ def collect_news(cfg, state, cid, csec, now):
     min_shared = dup_cfg.get("min_shared_words", 4)
     body_ratio = dup_cfg.get("body_similarity", 0.5)
     body_shared = dup_cfg.get("body_min_shared_words", 10)
+    near_hours = dup_cfg.get("near_hours", 6)
+    near_ratio = dup_cfg.get("near_similarity", 0.35)
+    near_shared = dup_cfg.get("near_min_shared_words", 9)
     window = dup_cfg.get("window_hours", 48) * 3600
 
     # 이미 보낸 사건들의 제목 낱말 — 언론사만 바뀐 같은 기사를 잡아내는 데 쓴다
     cutoff = time.time() - window
-    known = [(set(v.get("w", [])), set(v.get("g", [])), set(v.get("b", [])))
+    known = [(set(v.get("w", [])), set(v.get("g", [])), set(v.get("b", [])), v.get("p"))
              for v in state.get("stories", {}).values()
              if v.get("t", 0) > cutoff]
 
@@ -292,18 +330,22 @@ def collect_news(cfg, state, cid, csec, now):
                     toks = story_tokens(item["title"])
                     grams = story_bigrams(item["title"])
                     btoks = story_tokens(f"{item['title']} {item['desc']}")
+                    pub_ts = item["pub"].timestamp() if item.get("pub") else None
                     if dup_on and any(
                             same_story(toks, kw, min_ratio, min_shared, grams, kg,
-                                       btoks, kb, body_ratio, body_shared)
-                            for kw, kg, kb in known):
+                                       btoks, kb, body_ratio, body_shared,
+                                       pub_ts, kp, near_hours, near_ratio, near_shared)
+                            for kw, kg, kb, kp in known):
                         dup_dropped[0] += 1
                         continue
                     if dup_on:
-                        known.append((toks, grams, btoks))  # 같은 사이클 안의 재탕도 막는다
+                        # 같은 사이클 안에서 연달아 들어온 재탕도 막는다
+                        known.append((toks, grams, btoks, pub_ts))
                     picked.append({
                         "key": key, "kind": label, "emoji": emoji,
                         "subject": ent["name"], "tokens": sorted(toks),
-                        "grams": sorted(grams), "btokens": sorted(btoks), **item,
+                        "grams": sorted(grams), "btokens": sorted(btoks),
+                        "pub_ts": pub_ts, **item,
                     })
                 time.sleep(0.12)   # 네이버 API 호출 간 최소 간격
         picked.sort(key=lambda h: h["pub"] or now, reverse=True)
@@ -501,7 +543,8 @@ def main():
             state["news"][h["key"]] = time.time()
             state["stories"][h["key"]] = {"w": h.get("tokens", []),
                                           "g": h.get("grams", []),
-                                          "b": h.get("btokens", []), "t": time.time()}
+                                          "b": h.get("btokens", []),
+                                          "p": h.get("pub_ts"), "t": time.time()}
         state["bootstrapped"] = True
         save_state(state, cfg["poll"]["seen_retention_days"],
                    (cfg.get("duplicate_filter") or {}).get("window_hours", 48))
@@ -517,7 +560,8 @@ def main():
             state["news"][h["key"]] = time.time()
             state["stories"][h["key"]] = {"w": h.get("tokens", []),
                                           "g": h.get("grams", []),
-                                          "b": h.get("btokens", []), "t": time.time()}
+                                          "b": h.get("btokens", []),
+                                          "p": h.get("pub_ts"), "t": time.time()}
             sent += 1
             time.sleep(0.4)        # 텔레그램 rate limit 여유
     log(f"{sent}건 전송")
