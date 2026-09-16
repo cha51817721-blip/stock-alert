@@ -18,7 +18,7 @@
     "require_any": "이 중 하나라도 없으면 버림. 이름이 흔한 종목의 오탐을 막는 맥락어. 없으면 이 검사를 건너뜁니다.",
     "exclude_any": "이 중 하나라도 있으면 버림.",
     "noise_filter": "시세 단어(급등·강세 등)가 있는데 알맹이 단어(수주·실적 등)가 하나도 없으면 버립니다. 주가가 얼마 올랐다는 기사만 걸러내는 장치입니다.",
-    "duplicate_filter": "같은 사건을 여러 언론사가 쓴 기사를 하나만 보냅니다. 제목이 딴판으로 뽑힌 경우를 위해 본문 요약까지 비교합니다.",
+    "duplicate_filter": "같은 사건을 여러 언론사가 쓴 기사를 하나만 보냅니다. 제목이 딴판인 경우를 위해 본문 요약까지 비교하고, 발행 시각이 near_hours 안으로 가까우면 기준을 낮춥니다.",
     "require_in_title": "켜면 핵심어가 제목에 있어야 통과합니다. 산업 테마에 걸어두면 본문에 키워드가 한 번 스친 정치·행정 기사를 막아줍니다."
   },
   "noise_filter": {
@@ -128,7 +128,10 @@
     "min_shared_words": 4,
     "window_hours": 48,
     "body_similarity": 0.5,
-    "body_min_shared_words": 10
+    "body_min_shared_words": 10,
+    "near_hours": 6,
+    "near_similarity": 0.35,
+    "near_min_shared_words": 9
   },
   "stocks": [
     {
